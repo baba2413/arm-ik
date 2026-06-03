@@ -21,6 +21,7 @@ PhysX. This helps perform parallelized computation of the inverse kinematics.
 
 """
 
+
 """Launch Isaac Sim Simulator first."""
 
 
@@ -94,9 +95,9 @@ class MyCustomSceneCfg(InteractiveSceneCfg):
         ),
         actuators={
                     "arm_joints": ImplicitActuatorCfg(
-                        joint_names_expr=[".*"],
-                        stiffness=800.0,
-                        damping=40.0,
+                        joint_names_expr=[".*"],  # 모든 조인트에 적용 (필요시 정규식 수정 가능)
+                        stiffness=800.0,          # 강성 (P Gain) - 로봇에 맞게 조절 필요
+                        damping=40.0,             # 감쇠 (D Gain) - 로봇에 맞게 조절 필요
                     )
                 },
         init_state = ArticulationCfg.InitialStateCfg(
@@ -163,25 +164,60 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     ik_commands[:] = ee_goals[current_goal_idx]
 
 
-    arm_joint_ids = [0,1,2,3,4,5,6]
     robot_entity_cfg = SceneEntityCfg("robot", body_names=["gripper_base"])
     robot_entity_cfg.resolve(scene)
 
 
     ee_frame_idx = robot_entity_cfg.body_ids[0]
-   
 
+    all_joint_names = robot.data.joint_names
+
+    print("-------------------------------")
+    for idx, name in enumerate(all_joint_names):
+        print(f"  Index [{idx}] : {name}")
+    print("-------------------------------")
+
+    joint_names = robot.data.joint_names
+    left_finger_idx = joint_names.index("LeftGripperJoint")
+    close_pose = torch.full((scene.num_envs, 1), -0.027, device=scene.device)
+    open_pose = torch.full((scene.num_envs, 1), 0.0, device=scene.device)
 
 
 
     # Define simulation stepping
     sim_dt = sim.get_physics_dt()
     count = 0
-    goal_changed = 0
+
+    joint_pos = robot.data.default_joint_pos.clone()
+    joint_pos_des = joint_pos[:, 0:6].clone()
+
+    def reset_action():
+        global joint_pos_des
+        ik_commands[:] = ee_goals[current_goal_idx]
+        joint_pos_des = joint_pos[:, 0:6].clone()
+        # reset controller
+        diff_ik_controller.reset()
+        diff_ik_controller.set_command(ik_commands)
+
+    def ik_compute():
+        global joint_pos_des
+        ee_jacobi_idx = ee_frame_idx - 1
+        # obtain quantities from simulation
+        jacobian = robot.root_physx_view.get_jacobians()[:, ee_jacobi_idx, :, [0,1,2,3,4,5]]
+        ee_pose_w = robot.data.body_pose_w[:, ee_frame_idx]
+        root_pose_w = robot.data.root_pose_w
+        joint_pos = robot.data.joint_pos[:, 0:6]
+        # compute frame in root frame
+        ee_pos_b, ee_quat_b = subtract_frame_transforms(
+            root_pose_w[:, 0:3], root_pose_w[:, 3:7], ee_pose_w[:, 0:3], ee_pose_w[:, 3:7]
+        )
+        # compute the joint commands
+        joint_pos_des = diff_ik_controller.compute(ee_pos_b, ee_quat_b, jacobian, joint_pos)
+
     # Simulation loop
     while simulation_app.is_running():
         # reset
-        if count % 400 == 0:
+        if count == 500:
             # reset time
             count = 0
             # reset joint state
@@ -190,48 +226,38 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             robot.write_joint_state_to_sim(joint_pos, joint_vel)
             robot.reset()
             # reset actions
-            ik_commands[:] = ee_goals[0]
-            joint_pos_des = joint_pos[:, robot_entity_cfg.joint_ids].clone()
-            # reset controller
-            diff_ik_controller.reset()
-            diff_ik_controller.set_command(ik_commands)
+            current_goal_idx = 0
+            reset_action()
 
-        else:
-            if count == 100:
-                current_goal_idx = 1
-                goal_changed = 1
-            elif count == 200:
-                current_goal_idx = 2
-                goal_changed = 1
-            elif count == 300:
-                current_goal_idx = 3
-                goal_changed = 1
+        elif count < 100:
+            current_goal_idx = 0
+            if count == 0: reset_action()
+            ik_compute()
+        elif count < 150:
+            robot.set_joint_position_target(close_pose, joint_ids=[left_finger_idx])
 
-            if goal_changed:
-                ik_commands[:] = ee_goals[current_goal_idx]
-                joint_pos_des = joint_pos[:, robot_entity_cfg.joint_ids].clone()
-                # reset controller
-                diff_ik_controller.reset()
-                diff_ik_controller.set_command(ik_commands)
-                goal_changed = 0
+        elif count < 250:
+            current_goal_idx = 1
+            if count == 150: reset_action()
+            ik_compute()
+            # robot.set_joint_position_target(close_pose, joint_ids=[left_finger_idx])
+        elif count <350:
+            current_goal_idx = 2
+            if count == 250: reset_action()
+            ik_compute()
+            # robot.set_joint_position_target(close_pose, joint_ids=[left_finger_idx])
+        elif count <450:
+            current_goal_idx = 3
+            if count == 350: reset_action()
+            ik_compute()
+        elif count <500:
+            robot.set_joint_position_target(open_pose, joint_ids=[left_finger_idx])
 
-            ee_jacobi_idx = ee_frame_idx - 1
-            # obtain quantities from simulation
-            jacobian = robot.root_physx_view.get_jacobians()[:, ee_jacobi_idx, :, robot_entity_cfg.joint_ids]
-            ee_pose_w = robot.data.body_pose_w[:, ee_frame_idx]
-            root_pose_w = robot.data.root_pose_w
-            joint_pos = robot.data.joint_pos[:, robot_entity_cfg.joint_ids]
-            # compute frame in root frame
-            ee_pos_b, ee_quat_b = subtract_frame_transforms(
-                root_pose_w[:, 0:3], root_pose_w[:, 3:7], ee_pose_w[:, 0:3], ee_pose_w[:, 3:7]
-            )
-            # compute the joint commands
-            joint_pos_des = diff_ik_controller.compute(ee_pos_b, ee_quat_b, jacobian, joint_pos)
+        robot.set_joint_position_target(joint_pos_des, joint_ids=[0,1,2,3,4,5])
 
-
-        # apply actions
-        robot.set_joint_position_target(joint_pos_des, joint_ids=robot_entity_cfg.joint_ids)
         scene.write_data_to_sim()
+
+
         # perform step
         sim.step()
         # update sim-time
