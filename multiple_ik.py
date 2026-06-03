@@ -188,70 +188,90 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     sim_dt = sim.get_physics_dt()
     count = 0
 
-    joint_pos = robot.data.default_joint_pos.clone()
-    joint_pos_des = joint_pos[:, 0:6].clone()
-
-    def reset_action():
-        global joint_pos_des
-        ik_commands[:] = ee_goals[current_goal_idx]
-        joint_pos_des = joint_pos[:, 0:6].clone()
-        # reset controller
-        diff_ik_controller.reset()
-        diff_ik_controller.set_command(ik_commands)
-
-    def ik_compute():
-        global joint_pos_des
-        ee_jacobi_idx = ee_frame_idx - 1
-        # obtain quantities from simulation
-        jacobian = robot.root_physx_view.get_jacobians()[:, ee_jacobi_idx, :, [0,1,2,3,4,5]]
-        ee_pose_w = robot.data.body_pose_w[:, ee_frame_idx]
-        root_pose_w = robot.data.root_pose_w
-        joint_pos = robot.data.joint_pos[:, 0:6]
-        # compute frame in root frame
-        ee_pos_b, ee_quat_b = subtract_frame_transforms(
-            root_pose_w[:, 0:3], root_pose_w[:, 3:7], ee_pose_w[:, 0:3], ee_pose_w[:, 3:7]
-        )
-        # compute the joint commands
-        joint_pos_des = diff_ik_controller.compute(ee_pos_b, ee_quat_b, jacobian, joint_pos)
+    arm_ik = 0
+    action_reset = 0
 
     # Simulation loop
     while simulation_app.is_running():
         # reset
-        if count == 500:
-            # reset time
+        if count % 500 == 0:
             count = 0
-            # reset joint state
+            # pose reset
             joint_pos = robot.data.default_joint_pos.clone()
             joint_vel = robot.data.default_joint_vel.clone()
             robot.write_joint_state_to_sim(joint_pos, joint_vel)
             robot.reset()
             # reset actions
             current_goal_idx = 0
-            reset_action()
+
+            action_reset = 1
+            arm_ik = 1
+            
+
 
         elif count < 100:
-            current_goal_idx = 0
-            if count == 0: reset_action()
-            ik_compute()
+            arm_ik = 1
+            action_reset = 0
+
         elif count < 150:
             robot.set_joint_position_target(close_pose, joint_ids=[left_finger_idx])
+            arm_ik = 0
+            action_reset = 0
 
         elif count < 250:
-            current_goal_idx = 1
-            if count == 150: reset_action()
-            ik_compute()
-            # robot.set_joint_position_target(close_pose, joint_ids=[left_finger_idx])
+            
+            if count == 150:
+                current_goal_idx = 1
+                action_reset = 1
+            else:
+                action_reset = 0
+            arm_ik = 1
+            
         elif count <350:
-            current_goal_idx = 2
-            if count == 250: reset_action()
-            ik_compute()
-            # robot.set_joint_position_target(close_pose, joint_ids=[left_finger_idx])
+            if count == 250:
+                current_goal_idx = 2
+                action_reset = 1
+            else:
+                action_reset = 0
+
+            arm_ik = 1
+            
         elif count <450:
-            current_goal_idx = 3
-            if count == 350: reset_action()
-            ik_compute()
+            if count == 350:
+                current_goal_idx = 3
+                action_reset = 1
+            else:
+                action_reset = 0
+
+            arm_ik = 1
+            
+
         elif count <500:
             robot.set_joint_position_target(open_pose, joint_ids=[left_finger_idx])
+            arm_ik = 0
+            action_reset = 0
+
+
+        if action_reset:
+            ik_commands[:] = ee_goals[current_goal_idx]
+            joint_pos_des = joint_pos[:, 0:6].clone()
+            # reset controller
+            diff_ik_controller.reset()
+            diff_ik_controller.set_command(ik_commands)
+
+        if arm_ik:
+            ee_jacobi_idx = ee_frame_idx - 1
+            # obtain quantities from simulation
+            jacobian = robot.root_physx_view.get_jacobians()[:, ee_jacobi_idx, :, [0,1,2,3,4,5]]
+            ee_pose_w = robot.data.body_pose_w[:, ee_frame_idx]
+            root_pose_w = robot.data.root_pose_w
+            joint_pos = robot.data.joint_pos[:, 0:6]
+            # compute frame in root frame
+            ee_pos_b, ee_quat_b = subtract_frame_transforms(
+                root_pose_w[:, 0:3], root_pose_w[:, 3:7], ee_pose_w[:, 0:3], ee_pose_w[:, 3:7]
+            )
+            # compute the joint commands
+            joint_pos_des = diff_ik_controller.compute(ee_pos_b, ee_quat_b, jacobian, joint_pos)
 
         robot.set_joint_position_target(joint_pos_des, joint_ids=[0,1,2,3,4,5])
 
