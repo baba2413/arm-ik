@@ -61,6 +61,7 @@ from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab.utils.math import subtract_frame_transforms
+from isaaclab.assets import RigidObject, RigidObjectCfg
 
 from isaaclab.assets import ArticulationCfg
 from isaaclab.actuators import ImplicitActuatorCfg
@@ -78,7 +79,7 @@ class MyCustomSceneCfg(InteractiveSceneCfg):
     ground = AssetBaseCfg(
         prim_path="/World/defaultGroundPlane",
         spawn=sim_utils.GroundPlaneCfg(),
-        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, -1.05)),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, -0.01)),
     )
 
 
@@ -95,9 +96,14 @@ class MyCustomSceneCfg(InteractiveSceneCfg):
         ),
         actuators={
                     "arm_joints": ImplicitActuatorCfg(
-                        joint_names_expr=[".*"],  # 모든 조인트에 적용 (필요시 정규식 수정 가능)
-                        stiffness=800.0,          # 강성 (P Gain) - 로봇에 맞게 조절 필요
-                        damping=40.0,             # 감쇠 (D Gain) - 로봇에 맞게 조절 필요
+                        joint_names_expr=["shoulder_yaw","shoulder_pitch","shoulder_roll","elbow_pitch","lower_arm_roll","wrist_pitch"],  # 모든 조인트에 적용 (필요시 정규식 수정 가능)
+                        stiffness=800.0,
+                        damping=40.0,
+                    ),
+                    "gripper_joints": ImplicitActuatorCfg(
+                        joint_names_expr=["LeftGripperJoint"],
+                        stiffness=10000.0,
+                        damping=100.0,
                     )
                 },
         init_state = ArticulationCfg.InitialStateCfg(
@@ -110,10 +116,25 @@ class MyCustomSceneCfg(InteractiveSceneCfg):
                 "elbow_pitch": 2.0944,
                 "lower_arm_roll": 0.0,
                 "wrist_pitch": -1.0472,
+                "LeftGripperJoint": 0.0,
             }
         )
     )
 
+    cube = RigidObjectCfg(
+        prim_path = "/World/Cube",
+        spawn = sim_utils.CuboidCfg(
+            size = (0.04, 0.04, 0.155),
+            rigid_props = sim_utils.RigidBodyPropertiesCfg(),
+            mass_props = sim_utils.MassPropertiesCfg(mass=1.0),
+            collision_props = sim_utils.CollisionPropertiesCfg(),
+            visual_material = sim_utils.PreviewSurfaceCfg(diffuse_color = (1.0,0.0,0.0), metallic = 0.2),
+        ),
+        init_state = RigidObjectCfg.InitialStateCfg(
+            pos = (0.53,0.00911,0.0),
+            rot = (1,0,0,0),
+        ),
+    )
 
 
 
@@ -122,6 +143,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     # Extract scene entities
     # note: we only do this here for readability.
     robot = scene["robot"]
+    cube = scene["cube"]
 
 
     # Create controller
@@ -153,7 +175,8 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         [0.4, 0, 0.1, 1, 0, 0, 0],
         [0.3203, 0, 0.2597, 1, 0, 0, 0],
         [0.2265, 0.2265, 0.2597, 0.9239, 0, 0, 0.3827],
-        [0.2265, 0.2265, 0.1, 0.9239, 0, 0, 0.3827]
+        [0.2265, 0.2265, 0.07, 0.9239, 0, 0, 0.3827],
+        [0.1465, 0.1465, 0.2597, 0.9239, 0, 0, 0.3827],
     ]
 
     ee_goals = torch.tensor(ee_goals, device=sim.device)
@@ -179,7 +202,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
 
     joint_names = robot.data.joint_names
     left_finger_idx = joint_names.index("LeftGripperJoint")
-    close_pose = torch.full((scene.num_envs, 1), -0.027, device=scene.device)
+    close_pose = torch.full((scene.num_envs, 1), -0.02, device=scene.device) # -0.027
     open_pose = torch.full((scene.num_envs, 1), 0.0, device=scene.device)
 
 
@@ -194,7 +217,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     # Simulation loop
     while simulation_app.is_running():
         # reset
-        if count % 500 == 0:
+        if count % 600 == 0:
             count = 0
             # pose reset
             joint_pos = robot.data.default_joint_pos.clone()
@@ -206,7 +229,14 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
 
             action_reset = 1
             arm_ik = 1
-            
+
+            #reset_cube
+            cube_state = cube.data.default_root_state.clone()
+            cube_state[:,0] = 0.53
+            cube_state[:,1] = 0.00911
+            cube_state[:,2] = 0.0
+            cube_state[:,7:13] = 0.0
+            cube.write_root_state_to_sim(cube_state)
 
 
         elif count < 100:
@@ -250,6 +280,15 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             robot.set_joint_position_target(open_pose, joint_ids=[left_finger_idx])
             arm_ik = 0
             action_reset = 0
+
+        elif count <600:
+            if count == 500:
+                current_goal_idx = 4
+                action_reset = 1
+            else:
+                action_reset = 0
+
+            arm_ik = 1
 
 
         if action_reset:
