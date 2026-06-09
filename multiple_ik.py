@@ -49,6 +49,7 @@ simulation_app = app_launcher.app
 
 
 import torch
+from datetime import datetime
 
 
 import isaaclab.sim as sim_utils
@@ -65,6 +66,9 @@ from isaaclab.assets import RigidObject, RigidObjectCfg
 
 from isaaclab.assets import ArticulationCfg
 from isaaclab.actuators import ImplicitActuatorCfg
+from isaaclab.sensors import CameraCfg, ContactSensorCfg, RayCasterCfg, patterns
+
+import cv2
 
 from pathlib import Path
 CURRENT_DIR = Path(__file__).parent.absolute()
@@ -122,7 +126,7 @@ class MyCustomSceneCfg(InteractiveSceneCfg):
     )
 
     cube = RigidObjectCfg(
-        prim_path = "/World/Cube",
+        prim_path = "{ENV_REGEX_NS}/Cube",
         spawn = sim_utils.CuboidCfg(
             size = (0.04, 0.04, 0.155),
             rigid_props = sim_utils.RigidBodyPropertiesCfg(),
@@ -136,7 +140,23 @@ class MyCustomSceneCfg(InteractiveSceneCfg):
         ),
     )
 
+    # sensors
+    camera = CameraCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/.*/wrist_link/front_cam",
+        update_period=0.1,
+        height=480,
+        width=640,
+        data_types=["rgb", "distance_to_image_plane"],
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.1, 1.0e5)
+        ),
+        offset=CameraCfg.OffsetCfg(
+            pos=(0.07196, 0.03, 0.05002), 
+            rot=(0.46037, -0.53671, 0.53671, -0.46037), 
+            convention="ros"),
+    )
 
+    # 0.39254, -0.58814, 0.58814, -0.39254
 
 def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     """Runs the simulation loop."""
@@ -200,6 +220,12 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         print(f"  Index [{idx}] : {name}")
     print("-------------------------------")
 
+    print("\n" + "="*50)
+    print("body link lists:")
+    for idx, name in enumerate(robot.data.body_names):
+        print(f"  {idx}: {name}")
+    print("="*50 + "\n")
+
     joint_names = robot.data.joint_names
     left_finger_idx = joint_names.index("LeftGripperJoint")
     close_pose = torch.full((scene.num_envs, 1), -0.02, device=scene.device) # -0.027
@@ -213,6 +239,8 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
 
     arm_ik = 0
     action_reset = 0
+
+    current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     # Simulation loop
     while simulation_app.is_running():
@@ -325,14 +353,32 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         scene.update(sim_dt)
 
 
-        # obtain quantities from simulation
-        ee_pose_w = robot.data.body_state_w[:, robot_entity_cfg.body_ids[0], 0:7]
-        # update marker positions
-        ee_marker.visualize(ee_pose_w[:, 0:3], ee_pose_w[:, 3:7])
-        goal_marker.visualize(ik_commands[:, 0:3] + scene.env_origins, ik_commands[:, 3:7])
+        # # obtain quantities from simulation
+        # ee_pose_w = robot.data.body_state_w[:, robot_entity_cfg.body_ids[0], 0:7]
+        # # update marker positions
+        # ee_marker.visualize(ee_pose_w[:, 0:3], ee_pose_w[:, 3:7])
+        # goal_marker.visualize(ik_commands[:, 0:3] + scene.env_origins, ik_commands[:, 3:7])
 
+        CURRENT_DIR = Path(__file__).parent.absolute()
+        IMAGE_DIR = Path.home() / "workspace1"/ "sampled_image" / current_time
+        IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 
+        if count % 100 == 0:
+            # print information from the sensors
+            print("-------------------------------")
+            # print(scene["camera"])
+            print("Received shape of rgb   image: ", scene["camera"].data.output["rgb"].shape)
+            print("Received shape of depth image: ", scene["camera"].data.output["distance_to_image_plane"].shape)
+            print("RGB Max Value: ", torch.max(scene["camera"].data.output["rgb"]).item())
+            print("Closest Depth Point: ", torch.min(scene["camera"].data.output["distance_to_image_plane"]).item())
 
+            rgb_tensor = scene["camera"].data.output["rgb"][0].cpu()
+            rgb_image = rgb_tensor.numpy()
+            bgr_image = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR)
+            rgb_filename = f"rgb_{count}.png"
+            rgb_path = IMAGE_DIR  / rgb_filename
+            cv2.imwrite(str(rgb_path), bgr_image)
+            print(f"IMAGE SAMPLED: {rgb_filename}")
 
 def main():
     """Main function."""
@@ -344,6 +390,9 @@ def main():
     # Design scene
     scene_cfg = MyCustomSceneCfg(num_envs=args_cli.num_envs, env_spacing=2.0)
     scene = InteractiveScene(scene_cfg)
+
+
+
     # Play the simulator
     sim.reset()
     # Now we are ready!
