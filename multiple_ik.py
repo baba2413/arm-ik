@@ -21,6 +21,7 @@ PhysX. This helps perform parallelized computation of the inverse kinematics.
 
 """
 
+
 """Launch Isaac Sim Simulator first."""
 
 
@@ -60,6 +61,7 @@ from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab.utils.math import subtract_frame_transforms
+from isaaclab.assets import RigidObject, RigidObjectCfg
 
 from isaaclab.assets import ArticulationCfg
 from isaaclab.actuators import ImplicitActuatorCfg
@@ -77,7 +79,7 @@ class MyCustomSceneCfg(InteractiveSceneCfg):
     ground = AssetBaseCfg(
         prim_path="/World/defaultGroundPlane",
         spawn=sim_utils.GroundPlaneCfg(),
-        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, -1.05)),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, -0.01)),
     )
 
 
@@ -94,9 +96,14 @@ class MyCustomSceneCfg(InteractiveSceneCfg):
         ),
         actuators={
                     "arm_joints": ImplicitActuatorCfg(
-                        joint_names_expr=[".*"],
+                        joint_names_expr=["shoulder_yaw","shoulder_pitch","shoulder_roll","elbow_pitch","lower_arm_roll","wrist_pitch"],  # 모든 조인트에 적용 (필요시 정규식 수정 가능)
                         stiffness=800.0,
                         damping=40.0,
+                    ),
+                    "gripper_joints": ImplicitActuatorCfg(
+                        joint_names_expr=["LeftGripperJoint"],
+                        stiffness=10000.0,
+                        damping=100.0,
                     )
                 },
         init_state = ArticulationCfg.InitialStateCfg(
@@ -109,10 +116,25 @@ class MyCustomSceneCfg(InteractiveSceneCfg):
                 "elbow_pitch": 2.0944,
                 "lower_arm_roll": 0.0,
                 "wrist_pitch": -1.0472,
+                "LeftGripperJoint": 0.0,
             }
         )
     )
 
+    cube = RigidObjectCfg(
+        prim_path = "/World/Cube",
+        spawn = sim_utils.CuboidCfg(
+            size = (0.04, 0.04, 0.155),
+            rigid_props = sim_utils.RigidBodyPropertiesCfg(),
+            mass_props = sim_utils.MassPropertiesCfg(mass=1.0),
+            collision_props = sim_utils.CollisionPropertiesCfg(),
+            visual_material = sim_utils.PreviewSurfaceCfg(diffuse_color = (1.0,0.0,0.0), metallic = 0.2),
+        ),
+        init_state = RigidObjectCfg.InitialStateCfg(
+            pos = (0.53,0.00911,0.0),
+            rot = (1,0,0,0),
+        ),
+    )
 
 
 
@@ -121,6 +143,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     # Extract scene entities
     # note: we only do this here for readability.
     robot = scene["robot"]
+    cube = scene["cube"]
 
 
     # Create controller
@@ -152,7 +175,8 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         [0.4, 0, 0.1, 1, 0, 0, 0],
         [0.3203, 0, 0.2597, 1, 0, 0, 0],
         [0.2265, 0.2265, 0.2597, 0.9239, 0, 0, 0.3827],
-        [0.2265, 0.2265, 0.1, 0.9239, 0, 0, 0.3827]
+        [0.2265, 0.2265, 0.07, 0.9239, 0, 0, 0.3827],
+        [0.1465, 0.1465, 0.2597, 0.9239, 0, 0, 0.3827],
     ]
 
     ee_goals = torch.tensor(ee_goals, device=sim.device)
@@ -163,64 +187,124 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     ik_commands[:] = ee_goals[current_goal_idx]
 
 
-    arm_joint_ids = [0,1,2,3,4,5,6]
     robot_entity_cfg = SceneEntityCfg("robot", body_names=["gripper_base"])
     robot_entity_cfg.resolve(scene)
 
 
     ee_frame_idx = robot_entity_cfg.body_ids[0]
-   
 
+    all_joint_names = robot.data.joint_names
+
+    print("-------------------------------")
+    for idx, name in enumerate(all_joint_names):
+        print(f"  Index [{idx}] : {name}")
+    print("-------------------------------")
+
+    joint_names = robot.data.joint_names
+    left_finger_idx = joint_names.index("LeftGripperJoint")
+    close_pose = torch.full((scene.num_envs, 1), -0.02, device=scene.device) # -0.027
+    open_pose = torch.full((scene.num_envs, 1), 0.0, device=scene.device)
 
 
 
     # Define simulation stepping
     sim_dt = sim.get_physics_dt()
     count = 0
-    goal_changed = 0
+
+    arm_ik = 0
+    action_reset = 0
+
     # Simulation loop
     while simulation_app.is_running():
         # reset
-        if count % 400 == 0:
-            # reset time
+        if count % 600 == 0:
             count = 0
-            # reset joint state
+            # pose reset
             joint_pos = robot.data.default_joint_pos.clone()
             joint_vel = robot.data.default_joint_vel.clone()
             robot.write_joint_state_to_sim(joint_pos, joint_vel)
             robot.reset()
             # reset actions
-            ik_commands[:] = ee_goals[0]
-            joint_pos_des = joint_pos[:, robot_entity_cfg.joint_ids].clone()
+            current_goal_idx = 0
+
+            action_reset = 1
+            arm_ik = 1
+
+            #reset_cube
+            cube_state = cube.data.default_root_state.clone()
+            cube_state[:,0] = 0.53
+            cube_state[:,1] = 0.00911
+            cube_state[:,2] = 0.0
+            cube_state[:,7:13] = 0.0
+            cube.write_root_state_to_sim(cube_state)
+
+
+        elif count < 100:
+            arm_ik = 1
+            action_reset = 0
+
+        elif count < 150:
+            robot.set_joint_position_target(close_pose, joint_ids=[left_finger_idx])
+            arm_ik = 0
+            action_reset = 0
+
+        elif count < 250:
+            
+            if count == 150:
+                current_goal_idx = 1
+                action_reset = 1
+            else:
+                action_reset = 0
+            arm_ik = 1
+            
+        elif count <350:
+            if count == 250:
+                current_goal_idx = 2
+                action_reset = 1
+            else:
+                action_reset = 0
+
+            arm_ik = 1
+            
+        elif count <450:
+            if count == 350:
+                current_goal_idx = 3
+                action_reset = 1
+            else:
+                action_reset = 0
+
+            arm_ik = 1
+            
+
+        elif count <500:
+            robot.set_joint_position_target(open_pose, joint_ids=[left_finger_idx])
+            arm_ik = 0
+            action_reset = 0
+
+        elif count <600:
+            if count == 500:
+                current_goal_idx = 4
+                action_reset = 1
+            else:
+                action_reset = 0
+
+            arm_ik = 1
+
+
+        if action_reset:
+            ik_commands[:] = ee_goals[current_goal_idx]
+            joint_pos_des = joint_pos[:, 0:6].clone()
             # reset controller
             diff_ik_controller.reset()
             diff_ik_controller.set_command(ik_commands)
 
-        else:
-            if count == 100:
-                current_goal_idx = 1
-                goal_changed = 1
-            elif count == 200:
-                current_goal_idx = 2
-                goal_changed = 1
-            elif count == 300:
-                current_goal_idx = 3
-                goal_changed = 1
-
-            if goal_changed:
-                ik_commands[:] = ee_goals[current_goal_idx]
-                joint_pos_des = joint_pos[:, robot_entity_cfg.joint_ids].clone()
-                # reset controller
-                diff_ik_controller.reset()
-                diff_ik_controller.set_command(ik_commands)
-                goal_changed = 0
-
+        if arm_ik:
             ee_jacobi_idx = ee_frame_idx - 1
             # obtain quantities from simulation
-            jacobian = robot.root_physx_view.get_jacobians()[:, ee_jacobi_idx, :, robot_entity_cfg.joint_ids]
+            jacobian = robot.root_physx_view.get_jacobians()[:, ee_jacobi_idx, :, [0,1,2,3,4,5]]
             ee_pose_w = robot.data.body_pose_w[:, ee_frame_idx]
             root_pose_w = robot.data.root_pose_w
-            joint_pos = robot.data.joint_pos[:, robot_entity_cfg.joint_ids]
+            joint_pos = robot.data.joint_pos[:, 0:6]
             # compute frame in root frame
             ee_pos_b, ee_quat_b = subtract_frame_transforms(
                 root_pose_w[:, 0:3], root_pose_w[:, 3:7], ee_pose_w[:, 0:3], ee_pose_w[:, 3:7]
@@ -228,10 +312,11 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             # compute the joint commands
             joint_pos_des = diff_ik_controller.compute(ee_pos_b, ee_quat_b, jacobian, joint_pos)
 
+        robot.set_joint_position_target(joint_pos_des, joint_ids=[0,1,2,3,4,5])
 
-        # apply actions
-        robot.set_joint_position_target(joint_pos_des, joint_ids=robot_entity_cfg.joint_ids)
         scene.write_data_to_sim()
+
+
         # perform step
         sim.step()
         # update sim-time
