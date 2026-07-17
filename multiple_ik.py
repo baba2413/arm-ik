@@ -86,6 +86,15 @@ class MyCustomSceneCfg(InteractiveSceneCfg):
         init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, -0.01)),
     )
 
+    # table = AssetBaseCfg(
+    #         prim_path="/World/Table",
+    #         spawn=sim_utils.UsdFileCfg(
+    #             usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Mounts/SeattleLabTable/table_instanceable.usd",
+    #             rigid_props=sim_utils.RigidBodyPropertiesCfg(rigid_body_enabled=True, kinematic_enabled=True),
+    #             collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
+    #         ),
+    #         init_state=AssetBaseCfg.InitialStateCfg(pos=(0.6, 0.0, 0.0)),
+    #     )
 
     # lights
     dome_light = AssetBaseCfg(
