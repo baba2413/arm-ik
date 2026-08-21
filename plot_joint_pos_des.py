@@ -19,12 +19,6 @@ parser = argparse.ArgumentParser(description="Real-time plot of joint_pos_des fr
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to spawn.")
 parser.add_argument("--plot_every", type=int, default=5, help="Redraw the plot every N simulation steps.")
 parser.add_argument("--window", type=float, default=10.0, help="Seconds of recent history to show (0 = full history).")
-parser.add_argument(
-    "--max_joint_vel",
-    type=float,
-    default=0.5,
-    help="Max joint speed [rad/s]. Caps how fast joint_pos_des can change per step (0 = no limit).",
-)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
@@ -57,6 +51,9 @@ from isaaclab.actuators import ImplicitActuatorCfg
 from pathlib import Path
 CURRENT_DIR = Path(__file__).parent.absolute()
 USD_PATH = Path.home() / "workspace1" / "robot_arm_usd" / "arm_gripper.usd"
+
+# Max joint speed [rad/s]. Caps how fast joint_pos_des can change per step (0 = no limit).
+MAX_JOINT_VEL = 0.5
 
 JOINT_NAMES = ["shoulder_yaw", "shoulder_pitch", "shoulder_roll", "elbow_pitch", "lower_arm_roll", "wrist_pitch"]
 
@@ -187,7 +184,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
 
     # Boomerang (back-and-forth) sequence: 0->1->2->3->4->3->2->1->(repeat)
     BOOMERANG_SEQUENCE = [0, 1, 2, 3, 2, 1]
-    SEGMENT_STEPS = 250  # number of steps to hold each goal
+    SEGMENT_STEPS = 150  # number of steps to hold each goal
 
     current_goal_idx = BOOMERANG_SEQUENCE[0]
     ik_commands = torch.zeros(scene.num_envs, diff_ik_controller.action_dim, device=robot.device)
@@ -242,8 +239,8 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         # Rate-limit the commanded joint step so motion speed is controlled directly,
         # instead of relying on SEGMENT_STEPS (which only sets dwell time at the goal;
         # the raw IK solve above jumps to the full target pose in ~1 step regardless).
-        if args_cli.max_joint_vel > 0.0:
-            max_delta = args_cli.max_joint_vel * sim_dt
+        if MAX_JOINT_VEL > 0.0:
+            max_delta = MAX_JOINT_VEL * sim_dt
             delta = torch.clamp(raw_joint_pos_des - joint_pos_des, -max_delta, max_delta)
             joint_pos_des = joint_pos_des + delta
         else:
