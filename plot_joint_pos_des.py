@@ -10,7 +10,7 @@ joints in real time.
 """
 
 import argparse
-import socket  # <-- UDP 통신을 위해 추가
+import socket  # <-- added for UDP communication
 
 from isaaclab.app import AppLauncher
 
@@ -61,7 +61,7 @@ USD_PATH = Path.home() / "workspace1" / "robot_arm_usd" / "arm_gripper.usd"
 JOINT_NAMES = ["shoulder_yaw", "shoulder_pitch", "shoulder_roll", "elbow_pitch", "lower_arm_roll", "wrist_pitch"]
 
 # -------------------------------------------------------------
-# UDP 통신 설정 (Teensy 보드 주소)
+# UDP communication setup (Teensy board address)
 # -------------------------------------------------------------
 TEENSY_IP = "192.168.1.15"
 UDP_PORT = 5005
@@ -185,9 +185,9 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
 
     ee_goals = torch.tensor(ee_goals, device=sim.device)
 
-    # 부메랑(왕복) 시퀀스: 0->1->2->3->4->3->2->1->(반복)
+    # Boomerang (back-and-forth) sequence: 0->1->2->3->4->3->2->1->(repeat)
     BOOMERANG_SEQUENCE = [0, 1, 2, 3, 2, 1]
-    SEGMENT_STEPS = 250  # 목표 하나를 유지하는 스텝 수
+    SEGMENT_STEPS = 250  # number of steps to hold each goal
 
     current_goal_idx = BOOMERANG_SEQUENCE[0]
     ik_commands = torch.zeros(scene.num_envs, diff_ik_controller.action_dim, device=robot.device)
@@ -201,13 +201,13 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     sim_dt = sim.get_physics_dt()
     count = 0
 
-    # 로봇이 반드시 init_state(joint_pos)에서 시작하도록 시작 시점에 1회만 명시적으로 세팅.
+    # Explicitly set this once at startup so the robot always starts from init_state(joint_pos).
     init_joint_pos = robot.data.default_joint_pos.clone()
     init_joint_vel = robot.data.default_joint_vel.clone()
     robot.write_joint_state_to_sim(init_joint_pos, init_joint_vel)
     robot.reset()
 
-    # 목표 각도 변수 초기화
+    # Initialize the target angle variable
     joint_pos_des = init_joint_pos[:, 0:6].clone()
 
     live_plot = LiveJointPlot(JOINT_NAMES, window=args_cli.window, sim_dt=sim_dt)
@@ -252,8 +252,8 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         robot.set_joint_position_target(joint_pos_des, joint_ids=[0, 1, 2, 3, 4, 5])
 
         # -------------------------------------------------------------
-        # UDP: CAN ID 매핑과 모터:링크 기어비 변환은 Teensy(main.cpp)가 전담한다.
-        # 여기서는 시뮬레이션(링크) 좌표계 각도(rate-limited joint_pos_des)를 그대로 전송한다.
+        # UDP: CAN ID mapping and motor:link gear ratio conversion are handled entirely by the Teensy (main.cpp).
+        # Here we simply send the simulation (link) frame angles (rate-limited joint_pos_des) as-is.
         # -------------------------------------------------------------
         target_yaw = joint_pos_des[0, 0].item()
         target_pitch = joint_pos_des[0, 1].item()
