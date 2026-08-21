@@ -149,11 +149,32 @@ udp_msg = f"P,{target_yaw:.4f},{target_pitch:.4f},{target_roll:.4f},{target_elbo
 
 - `lower_arm_roll`, `wrist_pitch`, and both gripper joints are **not** sent —
   those 4 hardware channels aren't wired up yet.
-- The values sent are simulation (link-frame) joint angles in radians, taken
-  straight from `joint_pos_des` (rate-limited, in `plot_joint_pos_des.py`).
-  CAN ID mapping and the motor↔link gear-ratio conversion are done entirely
-  on the Teensy (`main.cpp`) — this script never converts to motor-shaft
-  units.
+
+### Virtual joint angle, not motor-shaft angle — gear ratio is NOT applied here
+
+The 4 values sent are **virtual joint** angles: the link-frame joint angles
+Isaac Sim's articulation solves for (`joint_pos_des`, rate-limited in
+`plot_joint_pos_des.py`), exactly as the simulated robot uses them. They are
+*not* real motor-shaft angles.
+
+- **Virtual joint** = the simulated joint in Isaac Sim (`shoulder_yaw`,
+  `shoulder_pitch`, ...). One virtual-joint radian = one radian of actual
+  link rotation, by definition — that's the frame the IK controller and the
+  Jacobian operate in.
+- **Real motor** = the physical motor shaft driving that joint through a
+  gearbox/CAN actuator. Because of the gear ratio, the motor shaft has to
+  turn `gear_ratio × Δjoint_angle` to move the link by `Δjoint_angle` (e.g.
+  `shoulder_yaw`'s motor turns 4.8077 radians for every 1 radian the link
+  itself rotates).
+
+This script sends the **virtual/link angle only** — the gear-ratio
+multiplication (and CAN ID routing) has **not** been applied by the time the
+packet leaves Python. That conversion is left entirely to the Teensy
+(`main.cpp`), which is expected to multiply each incoming angle by its
+joint's gear ratio before commanding the corresponding CAN motor. If the
+firmware ever changes to expect motor-shaft angles directly, this script
+would need to apply the gear ratios itself before sending — right now it
+does not.
 
 Example packet: `P,0.1234,-1.0472,0.0000,2.0944`
 
