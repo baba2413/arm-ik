@@ -4,7 +4,9 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 """
-This script demonstrates how to use the differential inverse kinematics controller with the simulator.
+Runs the same differential-IK simulation as multiple_ik_udp.py, sending the same
+UDP commands to the Teensy board, while also plotting joint_pos_des for all 6 arm
+joints in real time.
 """
 
 import argparse
@@ -13,8 +15,16 @@ import socket  # <-- UDP 통신을 위해 추가
 from isaaclab.app import AppLauncher
 
 # add argparse arguments
-parser = argparse.ArgumentParser(description="Tutorial on using the differential IK controller.")
+parser = argparse.ArgumentParser(description="Real-time plot of joint_pos_des from the differential IK controller.")
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to spawn.")
+parser.add_argument("--plot_every", type=int, default=5, help="Redraw the plot every N simulation steps.")
+parser.add_argument("--window", type=float, default=10.0, help="Seconds of recent history to show (0 = full history).")
+parser.add_argument(
+    "--max_joint_vel",
+    type=float,
+    default=0.5,
+    help="Max joint speed [rad/s]. Caps how fast joint_pos_des can change per step (0 = no limit).",
+)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
@@ -26,6 +36,9 @@ simulation_app = app_launcher.app
 
 """Rest everything follows."""
 
+from collections import deque
+
+import matplotlib.pyplot as plt
 import torch
 
 import isaaclab.sim as sim_utils
@@ -36,16 +49,16 @@ from isaaclab.markers import VisualizationMarkers
 from isaaclab.markers.config import FRAME_MARKER_CFG
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
 from isaaclab.utils import configclass
-from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab.utils.math import subtract_frame_transforms
-from isaaclab.assets import RigidObject, RigidObjectCfg
 
 from isaaclab.assets import ArticulationCfg
 from isaaclab.actuators import ImplicitActuatorCfg
 
 from pathlib import Path
 CURRENT_DIR = Path(__file__).parent.absolute()
-USD_PATH = Path.home() / "workspace1"/ "robot_arm_usd" / "arm_gripper.usd"
+USD_PATH = Path.home() / "workspace1" / "robot_arm_usd" / "arm_gripper.usd"
+
+JOINT_NAMES = ["shoulder_yaw", "shoulder_pitch", "shoulder_roll", "elbow_pitch", "lower_arm_roll", "wrist_pitch"]
 
 # -------------------------------------------------------------
 # UDP 통신 설정 (Teensy 보드 주소)
@@ -57,10 +70,6 @@ udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
 @configclass
 class MyCustomSceneCfg(InteractiveSceneCfg):
-    print("-" * 50)
-    print(f"[DEBUG] USD Path: {USD_PATH.resolve()}")
-    print(f"[DEBUG] Does File Exist: {USD_PATH.exists()}")
-    print("-" * 50)
     ground = AssetBaseCfg(
         prim_path="/World/defaultGroundPlane",
         spawn=sim_utils.GroundPlaneCfg(),
@@ -73,13 +82,13 @@ class MyCustomSceneCfg(InteractiveSceneCfg):
     )
 
     robot = ArticulationCfg(
-        prim_path = "{ENV_REGEX_NS}/Robot",
-        spawn = sim_utils.UsdFileCfg(
+        prim_path="{ENV_REGEX_NS}/Robot",
+        spawn=sim_utils.UsdFileCfg(
             usd_path=str(USD_PATH),
         ),
         actuators={
                     "arm_joints": ImplicitActuatorCfg(
-                        joint_names_expr=["shoulder_yaw","shoulder_pitch","shoulder_roll","elbow_pitch","lower_arm_roll","wrist_pitch"],
+                        joint_names_expr=JOINT_NAMES,
                         stiffness=800.0,
                         damping=40.0,
                     ),
@@ -89,13 +98,13 @@ class MyCustomSceneCfg(InteractiveSceneCfg):
                         damping=100.0,
                     )
                 },
-        init_state = ArticulationCfg.InitialStateCfg(
-            pos = (0,0,0),
-            rot=(0,0,0,0),
+        init_state=ArticulationCfg.InitialStateCfg(
+            pos=(0, 0, 0),
+            rot=(0, 0, 0, 0),
             joint_pos={
                 "shoulder_yaw": 0.0,
                 "shoulder_pitch": -1.0472,
-                "shoulder_roll":0.0,
+                "shoulder_roll": 0.0,
                 "elbow_pitch": 2.0944,
                 "lower_arm_roll": 0.0,
                 "wrist_pitch": -1.0472,
@@ -103,6 +112,56 @@ class MyCustomSceneCfg(InteractiveSceneCfg):
             }
         )
     )
+
+
+class LiveJointPlot:
+    """Rolling/real-time line plot of joint_pos_des, fed one sample at a time."""
+
+    def __init__(self, joint_names: list[str], window: float, sim_dt: float):
+        self.window = window
+        maxlen = max(int(window / sim_dt), 1) if window > 0.0 else None
+        self.time_hist: deque[float] = deque(maxlen=maxlen)
+        self.joint_hist: list[deque[float]] = [deque(maxlen=maxlen) for _ in joint_names]
+
+        plt.ion()
+        self.fig, self.axes = plt.subplots(2, 3, figsize=(12, 6), sharex=True)
+        self.axes = self.axes.flatten()
+        self.lines = []
+        for ax, name in zip(self.axes, joint_names):
+            (line,) = ax.plot([], [], lw=1.5)
+            ax.set_title(name)
+            ax.set_xlabel("time [s]")
+            ax.set_ylabel("joint_pos_des [rad]")
+            ax.grid(True, alpha=0.3)
+            self.lines.append(line)
+        self.fig.suptitle("joint_pos_des (real-time)")
+        self.fig.tight_layout()
+        self.fig.canvas.draw()
+        self.fig.canvas.flush_events()
+
+    def append(self, t: float, joint_pos_des_row):
+        self.time_hist.append(t)
+        for j, val in enumerate(joint_pos_des_row):
+            self.joint_hist[j].append(val)
+
+    def redraw(self):
+        if self.window > 0.0 and self.time_hist:
+            t_min = self.time_hist[-1] - self.window
+        else:
+            t_min = None
+
+        for ax, line, hist in zip(self.axes, self.lines, self.joint_hist):
+            line.set_data(self.time_hist, hist)
+            ax.relim()
+            ax.autoscale_view()
+            if t_min is not None:
+                ax.set_xlim(left=max(t_min, 0.0), right=self.time_hist[-1] + 1e-6)
+
+        self.fig.canvas.draw_idle()
+        self.fig.canvas.flush_events()
+
+    def closed(self) -> bool:
+        return not plt.fignum_exists(self.fig.number)
 
 
 def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
@@ -127,10 +186,8 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     ee_goals = torch.tensor(ee_goals, device=sim.device)
 
     # 부메랑(왕복) 시퀀스: 0->1->2->3->4->3->2->1->(반복)
-    # 양 끝(0, 4)에서만 값이 재사용되고 텔레포트 없이 goal 사이만 오가므로
-    # 실기 모터에도 항상 연속적인 목표 각도가 전달된다.
     BOOMERANG_SEQUENCE = [0, 1, 2, 3, 2, 1]
-    SEGMENT_STEPS = 100  # 목표 하나를 유지하는 스텝 수
+    SEGMENT_STEPS = 250  # 목표 하나를 유지하는 스텝 수
 
     current_goal_idx = BOOMERANG_SEQUENCE[0]
     ik_commands = torch.zeros(scene.num_envs, diff_ik_controller.action_dim, device=robot.device)
@@ -141,18 +198,10 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
 
     ee_frame_idx = robot_entity_cfg.body_ids[0]
 
-    all_joint_names = robot.data.joint_names
-
-    print("-------------------------------")
-    for idx, name in enumerate(all_joint_names):
-        print(f"  Index [{idx}] : {name}")
-    print("-------------------------------")
-
     sim_dt = sim.get_physics_dt()
     count = 0
 
     # 로봇이 반드시 init_state(joint_pos)에서 시작하도록 시작 시점에 1회만 명시적으로 세팅.
-    # (반복 순간이동이 아니라 최초 1회 초기화이므로 실기 안전 문제와는 무관)
     init_joint_pos = robot.data.default_joint_pos.clone()
     init_joint_vel = robot.data.default_joint_vel.clone()
     robot.write_joint_state_to_sim(init_joint_pos, init_joint_vel)
@@ -161,8 +210,13 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     # 목표 각도 변수 초기화
     joint_pos_des = init_joint_pos[:, 0:6].clone()
 
+    live_plot = LiveJointPlot(JOINT_NAMES, window=args_cli.window, sim_dt=sim_dt)
+
     # Simulation loop
     while simulation_app.is_running():
+        if live_plot.closed():
+            break
+
         seq_pos = count % (SEGMENT_STEPS * len(BOOMERANG_SEQUENCE))
         seq_idx = seq_pos // SEGMENT_STEPS
         action_reset = (seq_pos % SEGMENT_STEPS == 0)
@@ -170,42 +224,37 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         if action_reset:
             current_goal_idx = BOOMERANG_SEQUENCE[seq_idx]
             ik_commands[:] = ee_goals[current_goal_idx]
-            # count==0(최초 시작)은 위에서 이미 확정한 init_joint_pos를 그대로 사용.
-            # robot.reset() 직후 robot.data.joint_pos 버퍼가 아직 갱신되지 않았을 수
-            # 있어, 이 시점만은 robot.data.joint_pos를 다시 읽지 않는다.
             if count > 0:
                 joint_pos_des = robot.data.joint_pos[:, 0:6].clone()
             diff_ik_controller.reset()
             diff_ik_controller.set_command(ik_commands)
 
         ee_jacobi_idx = ee_frame_idx - 1
-        jacobian = robot.root_physx_view.get_jacobians()[:, ee_jacobi_idx, :, [0,1,2,3,4,5]]
+        jacobian = robot.root_physx_view.get_jacobians()[:, ee_jacobi_idx, :, [0, 1, 2, 3, 4, 5]]
         ee_pose_w = robot.data.body_pose_w[:, ee_frame_idx]
         root_pose_w = robot.data.root_pose_w
         joint_pos = robot.data.joint_pos[:, 0:6]
         ee_pos_b, ee_quat_b = subtract_frame_transforms(
             root_pose_w[:, 0:3], root_pose_w[:, 3:7], ee_pose_w[:, 0:3], ee_pose_w[:, 3:7]
         )
-        joint_pos_des = diff_ik_controller.compute(ee_pos_b, ee_quat_b, jacobian, joint_pos)
+        raw_joint_pos_des = diff_ik_controller.compute(ee_pos_b, ee_quat_b, jacobian, joint_pos)
 
-        # 1. 시뮬레이션 내 가상 로봇 제어
-        robot.set_joint_position_target(joint_pos_des, joint_ids=[0,1,2,3,4,5])
+        # Rate-limit the commanded joint step so motion speed is controlled directly,
+        # instead of relying on SEGMENT_STEPS (which only sets dwell time at the goal;
+        # the raw IK solve above jumps to the full target pose in ~1 step regardless).
+        if args_cli.max_joint_vel > 0.0:
+            max_delta = args_cli.max_joint_vel * sim_dt
+            delta = torch.clamp(raw_joint_pos_des - joint_pos_des, -max_delta, max_delta)
+            joint_pos_des = joint_pos_des + delta
+        else:
+            joint_pos_des = raw_joint_pos_des
+
+        robot.set_joint_position_target(joint_pos_des, joint_ids=[0, 1, 2, 3, 4, 5])
 
         # -------------------------------------------------------------
-        # 2. UDP
+        # UDP: CAN ID 매핑과 모터:링크 기어비 변환은 Teensy(main.cpp)가 전담한다.
+        # 여기서는 시뮬레이션(링크) 좌표계 각도(rate-limited joint_pos_des)를 그대로 전송한다.
         # -------------------------------------------------------------
-        # Index 0 : shoulder_yaw   (하드웨어 CAN ID 1, 모터:링크 4.8077:1)
-        # Index 1 : shoulder_pitch (하드웨어 CAN ID 3, 모터:링크 3.180:1)
-        # Index 2 : shoulder_roll  (하드웨어 CAN ID 2, 1:1)
-        # Index 3 : elbow_pitch    (하드웨어 CAN ID 4, 1:1)
-        # Index 4 : lower_arm_roll (미구현)
-        # Index 5 : wrist_pitch (미구현)
-        # Index 6 : LeftGripperJoint (미구현)
-        # Index 7 : RightGripperJoint (미구현)
-        #
-        # CAN ID 매핑과 모터:링크 기어비 변환은 Teensy(main.cpp)가 전담한다.
-        # 여기서는 시뮬레이션(링크) 좌표계 각도를 그대로 전송한다.
-
         target_yaw = joint_pos_des[0, 0].item()
         target_pitch = joint_pos_des[0, 1].item()
         target_roll = joint_pos_des[0, 2].item()
@@ -214,6 +263,10 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         udp_msg = f"P,{target_yaw:.4f},{target_pitch:.4f},{target_roll:.4f},{target_elbow:.4f}"
         udp_sock.sendto(udp_msg.encode(), (TEENSY_IP, UDP_PORT))
         # -------------------------------------------------------------
+
+        live_plot.append(count * sim_dt, joint_pos_des[0].detach().cpu().tolist())
+        if count % args_cli.plot_every == 0:
+            live_plot.redraw()
 
         scene.write_data_to_sim()
 
